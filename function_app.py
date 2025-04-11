@@ -723,3 +723,725 @@ def estimate_fallback_price(ingredient: str, unit: str) -> float:
     
     # Default fallback if no category match
     return 1.00
+
+
+# Complete set of endpoints for function_app.py with user_id for all
+
+@myapp.route(route="recipes/{user_id}", methods=["GET"])
+async def get_user_recipes(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get all recipes for a specific user.
+    This endpoint retrieves all recipes associated with a given user ID,
+    organized by their respective indexes/locations.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        
+        if not user_id:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Get location parameter (optional)
+        location = req.params.get('location')
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for user document
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Process recipes
+            recipes_response = {}
+            
+            if not location:
+                # Return all recipes organized by index/location
+                for index_name, recipes in user_doc.get("recipes", {}).items():
+                    filtered_recipes = []
+                    for recipe in recipes:
+                        # Extract only the necessary fields from recipe data
+                        simplified_recipe = {
+                            "id": recipe.get("id"),
+                            "recipe_name": recipe.get("data", {}).get("recipe_name"),
+                            "category": recipe.get("data", {}).get("Type", "Recipe"),
+                            "type": recipe.get("data", {}).get("Type", "Recipe"),
+                            "yields": recipe.get("data", {}).get("total_yield", ""),
+                            "no_of_servings": recipe.get("data", {}).get("servings", 0),
+                            "recipe_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                            "food_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                            "cost_id": recipe.get("sequence_number"),
+                            "inventory_id": [i for i, _ in enumerate(recipe.get("data", {}).get("ingredients", []), 1)],
+                            "steps_id": recipe.get("sequence_number")
+                        }
+                        filtered_recipes.append(simplified_recipe)
+                    
+                    recipes_response[index_name] = filtered_recipes
+            else:
+                # Filter by location
+                filtered_recipes = []
+                for index_name, recipes in user_doc.get("recipes", {}).items():
+                    for recipe in recipes:
+                        recipe_location = recipe.get("data", {}).get("location", "")
+                        
+                        # Check if location matches (case insensitive)
+                        if location.lower() == recipe_location.lower():
+                            simplified_recipe = {
+                                "id": recipe.get("id"),
+                                "recipe_name": recipe.get("data", {}).get("recipe_name"),
+                                "category": recipe.get("data", {}).get("Type", "Recipe"),
+                                "type": recipe.get("data", {}).get("Type", "Recipe"),
+                                "yields": recipe.get("data", {}).get("total_yield", ""),
+                                "no_of_servings": recipe.get("data", {}).get("servings", 0),
+                                "recipe_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                                "food_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                                "cost_id": recipe.get("sequence_number"),
+                                "inventory_id": [i for i, _ in enumerate(recipe.get("data", {}).get("ingredients", []), 1)],
+                                "steps_id": recipe.get("sequence_number")
+                            }
+                            filtered_recipes.append(simplified_recipe)
+                
+                recipes_response = {"recipes": filtered_recipes}
+            
+            return func.HttpResponse(
+                json.dumps(recipes_response),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_user_recipes: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="recipes/{user_id}/list", methods=["GET"])
+async def get_recipes(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get all recipes for a user based on location.
+    This endpoint retrieves a list of recipes available for the main page,
+    filtered based on a given location.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        if not user_id:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+            
+        # Get location parameter (required)
+        location = req.params.get('location')
+        
+        if not location:
+            return func.HttpResponse(
+                json.dumps({"error": "Location parameter is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for specific user
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Collect all recipes matching the location
+            all_recipes = []
+            for index_name, recipes in user_doc.get("recipes", {}).items():
+                for recipe in recipes:
+                    recipe_location = recipe.get("data", {}).get("location", "")
+                    
+                    # Check if location matches (case insensitive)
+                    if location.lower() == recipe_location.lower():
+                        simplified_recipe = {
+                            "id": int(recipe.get("sequence_number", 1)),
+                            "recipe_name": recipe.get("data", {}).get("recipe_name", ""),
+                            "category": recipe.get("data", {}).get("Type", "Recipe"),
+                            "type": "Bulk Recipe",
+                            "yields": recipe.get("data", {}).get("total_yield", "") or f"{recipe.get('data', {}).get('servings', 0)}.00 Pound",
+                            "no_of_servings": recipe.get("data", {}).get("servings", 0),
+                            "recipe_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                            "food_cost": f"${recipe.get('data', {}).get('total_cost', 0):.2f}",
+                            "cost_id": int(recipe.get("sequence_number", 1)),
+                            "inventory_id": [i for i, _ in enumerate(recipe.get("data", {}).get("ingredients", []), 1)],
+                            "steps_id": int(recipe.get("sequence_number", 1))
+                        }
+                        all_recipes.append(simplified_recipe)
+            
+            # Format according to second version in documentation
+            response = {
+                "recipes": all_recipes
+            }
+            
+            return func.HttpResponse(
+                json.dumps(response),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_recipes: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="statuses/{user_id}", methods=["GET"])
+async def get_statuses(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get all statuses for a user based on location.
+    This endpoint retrieves a list of statuses available for a given location.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        if not user_id:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+            
+        # Get location parameter (required)
+        location = req.params.get('location')
+        
+        if not location:
+            return func.HttpResponse(
+                json.dumps({"error": "Location parameter is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Define generic statuses - these could be stored in a database in a production environment
+        statuses = [
+            {
+                "id": 1,
+                "title": "Active"
+            },
+            {
+                "id": 2,
+                "title": "Inactive"
+            }
+        ]
+        
+        # In a real implementation, you might filter statuses by location and user
+        # Here we just return all statuses regardless of location
+        
+        return func.HttpResponse(
+            json.dumps(statuses),
+            mimetype="application/json",
+            status_code=200
+        )
+            
+    except Exception as e:
+        logging.error(f"Error in get_statuses: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="categories/{user_id}", methods=["GET"])
+async def get_categories(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get categories for a user based on location.
+    This endpoint retrieves a list of available categories for a given location.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        if not user_id:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+            
+        # Get location parameter (required)
+        location = req.params.get('location')
+        
+        if not location:
+            return func.HttpResponse(
+                json.dumps({"error": "Location parameter is required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for specific user
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Collect all unique categories from recipes matching the location
+            categories_set = set()
+            for index_name, recipes in user_doc.get("recipes", {}).items():
+                for recipe in recipes:
+                    recipe_location = recipe.get("data", {}).get("location", "")
+                    category = recipe.get("data", {}).get("Type", "Recipe")
+                    
+                    # Check if location matches (case insensitive) and add category
+                    if location.lower() == recipe_location.lower() and category:
+                        categories_set.add(category)
+            
+            # Format the categories as required
+            categories = []
+            for i, category in enumerate(sorted(categories_set), 1):
+                categories.append({
+                    "id": i,
+                    "title": category
+                })
+            
+            # If no categories found, provide default categories
+            if not categories:
+                categories = [
+                    {"id": 1, "title": "Pizza"},
+                    {"id": 2, "title": "Burger"},
+                    {"id": 3, "title": "Salad"}
+                ]
+            
+            return func.HttpResponse(
+                json.dumps(categories),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_categories: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="recipes/{user_id}/{recipe_id}/steps", methods=["GET"])
+async def get_recipe_steps(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get steps to prepare a recipe based on user, recipe ID and location.
+    This endpoint retrieves the step-by-step instructions for preparing a specific recipe.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        recipe_id = req.route_params.get('recipe_id')
+        location = req.params.get('location')
+        
+        if not user_id or not recipe_id or not location:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID, Recipe ID, and location are required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for specific user
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Find the recipe
+            recipe_found = None
+            recipe_seq_number = None
+            
+            for index_name, recipes in user_doc.get("recipes", {}).items():
+                for recipe in recipes:
+                    recipe_location = recipe.get("data", {}).get("location", "")
+                    if recipe.get("sequence_number") == int(recipe_id) and location.lower() == recipe_location.lower():
+                        recipe_found = recipe
+                        recipe_seq_number = recipe.get("sequence_number")
+                        break
+                if recipe_found:
+                    break
+            
+            if not recipe_found:
+                return func.HttpResponse(
+                    json.dumps({"error": "Recipe not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # In a real implementation, we'd have a "steps" field
+            # Here we create placeholder steps
+            preparation = recipe_found.get("data", {}).get("preparation", "")
+            topping = recipe_found.get("data", {}).get("topping", "")
+            
+            steps = []
+            if preparation:
+                steps.append({
+                    "id": 1,
+                    "step_number": 1,
+                    "description": preparation
+                })
+            
+            if topping:
+                steps.append({
+                    "id": len(steps) + 1,
+                    "step_number": len(steps) + 1,
+                    "description": f"Finish with {topping}"
+                })
+            
+            # If no steps found, provide generic steps
+            if not steps:
+                steps = [
+                    {
+                        "id": 1,
+                        "step_number": 1,
+                        "description": "Prepare all ingredients as specified."
+                    },
+                    {
+                        "id": 2,
+                        "step_number": 2,
+                        "description": "Combine ingredients in a medium bowl."
+                    }
+                ]
+            
+            return func.HttpResponse(
+                json.dumps(steps),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_recipe_steps: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="recipes/{user_id}/{recipe_id}/ingredients", methods=["GET"])
+async def get_recipe_ingredients(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get ingredients for a specific recipe.
+    This endpoint retrieves all ingredients associated with a given recipe ID for a specific user.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        recipe_id = req.route_params.get('recipe_id')
+        location = req.params.get('location')
+        
+        if not user_id or not recipe_id:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID and Recipe ID are required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for user document
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Find the specific recipe
+            recipe_found = None
+            
+            # If location is provided, use it as an additional filter
+            if location:
+                for index_name, recipes in user_doc.get("recipes", {}).items():
+                    for recipe in recipes:
+                        recipe_location = recipe.get("data", {}).get("location", "")
+                        if recipe.get("sequence_number") == int(recipe_id) and location.lower() == recipe_location.lower():
+                            recipe_found = recipe
+                            break
+                    if recipe_found:
+                        break
+            else:
+                # Search by sequence number without location filter
+                for index_name, recipes in user_doc.get("recipes", {}).items():
+                    for recipe in recipes:
+                        if recipe.get("sequence_number") == int(recipe_id):
+                            recipe_found = recipe
+                            break
+                    if recipe_found:
+                        break
+            
+            if not recipe_found:
+                return func.HttpResponse(
+                    json.dumps({"error": "Recipe not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Extract and format ingredients
+            ingredients = []
+            for i, ingredient in enumerate(recipe_found.get("data", {}).get("ingredients", []), 1):
+                formatted_ingredient = {
+                    "id": i,
+                    "ingredient": ingredient.get("ingredient", ""),
+                    "quantity": float(ingredient.get("converted_amount", 0)),
+                    "unit": ingredient.get("inventory_unit", "")
+                }
+                ingredients.append(formatted_ingredient)
+            
+            return func.HttpResponse(
+                json.dumps(ingredients),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_recipe_ingredients: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="recipes/{user_id}/{recipe_id}/cost", methods=["GET"])
+async def get_recipe_cost(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get cost information based on user, recipe ID and location.
+    This endpoint retrieves detailed cost information for a specific recipe.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        recipe_id = req.route_params.get('recipe_id')
+        location = req.params.get('location')
+        
+        if not user_id or not recipe_id or not location:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID, Recipe ID, and location are required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for specific user
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Find the recipe
+            recipe_found = None
+            
+            for index_name, recipes in user_doc.get("recipes", {}).items():
+                for recipe in recipes:
+                    recipe_location = recipe.get("data", {}).get("location", "")
+                    if recipe.get("sequence_number") == int(recipe_id) and location.lower() == recipe_location.lower():
+                        recipe_found = recipe
+                        break
+                if recipe_found:
+                    break
+            
+            if not recipe_found:
+                return func.HttpResponse(
+                    json.dumps({"error": "Recipe not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Calculate cost information
+            total_cost = recipe_found.get("data", {}).get("total_cost", 0)
+            # Assume food cost is 80% of total, material cost is 20%
+            food_cost = total_cost * 0.8
+            material_cost = total_cost * 0.2
+            
+            cost_info = [{
+                "id": int(recipe_id),
+                "total_cost": total_cost,
+                "food_cost": food_cost,
+                "food_cost_percentage": 80,
+                "material_cost": material_cost,
+                "material_cost_percentage": 20
+            }]
+            
+            return func.HttpResponse(
+                json.dumps(cost_info),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_recipe_cost: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
+
+@myapp.route(route="recipes/{user_id}/{recipe_id}/inventory-items", methods=["GET"])
+async def get_recipe_inventory_items(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Get inventory items based on user, recipe ID and location.
+    This endpoint retrieves the inventory items used in a specific recipe.
+    """
+    try:
+        user_id = req.route_params.get('user_id')
+        recipe_id = req.route_params.get('recipe_id')
+        location = req.params.get('location')
+        
+        if not user_id or not recipe_id or not location:
+            return func.HttpResponse(
+                json.dumps({"error": "User ID, Recipe ID, and location are required"}),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Initialize Cosmos DB client
+        async with CosmosClient(
+            url=os.environ["COSMOS_ENDPOINT"],
+            credential=os.environ["COSMOS_KEY"]
+        ) as cosmos_client:
+            database = cosmos_client.get_database_client("InvoicesDB")
+            container = database.get_container_client("Recipes")
+            
+            # Query for specific user
+            try:
+                user_doc = await container.read_item(
+                    item=user_id,
+                    partition_key=user_id
+                )
+            except Exception as e:
+                logging.error(f"Error retrieving user document: {str(e)}")
+                return func.HttpResponse(
+                    json.dumps({"error": "User not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Find the recipe
+            recipe_found = None
+            
+            for index_name, recipes in user_doc.get("recipes", {}).items():
+                for recipe in recipes:
+                    recipe_location = recipe.get("data", {}).get("location", "")
+                    if recipe.get("sequence_number") == int(recipe_id) and location.lower() == recipe_location.lower():
+                        recipe_found = recipe
+                        break
+                if recipe_found:
+                    break
+            
+            if not recipe_found:
+                return func.HttpResponse(
+                    json.dumps({"error": "Recipe not found"}),
+                    mimetype="application/json",
+                    status_code=404
+                )
+            
+            # Extract and format inventory items
+            inventory_items = []
+            for i, ingredient in enumerate(recipe_found.get("data", {}).get("ingredients", []), 1):
+                formatted_item = {
+                    "id": i,
+                    "recipe_id": int(recipe_id),
+                    "ingredient": ingredient.get("ingredient", ""),
+                    "quantity": float(ingredient.get("converted_amount", 0)),
+                    "unit": ingredient.get("inventory_unit", ""),
+                    "cost_per_bulk": float(ingredient.get("unit_cost", 0)),
+                    "cost_per_oz": float(ingredient.get("unit_cost", 0)) / 16.0 if ingredient.get("inventory_unit", "").lower() == "lb" else float(ingredient.get("unit_cost", 0))
+                }
+                inventory_items.append(formatted_item)
+            
+            return func.HttpResponse(
+                json.dumps(inventory_items),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in get_recipe_inventory_items: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            mimetype="application/json",
+            status_code=500
+        )
